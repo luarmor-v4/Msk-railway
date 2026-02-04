@@ -2,7 +2,37 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const { Connectors } = require('shoukaku');
 const { Kazagumo } = require('kazagumo');
 const express = require('express');
+
+// ============ LOAD ENVIRONMENT VARIABLES ============
 require('dotenv').config();
+
+// ============ DEBUG: LOG ENVIRONMENT VARIABLES ============
+console.log('🔍 Environment Check:');
+console.log('- NODE_ENV:', process.env.NODE_ENV || 'not set');
+console.log('- PORT:', process.env.PORT || 'not set');
+console.log('- DISCORD_TOKEN:', process.env.DISCORD_TOKEN ? `${process.env.DISCORD_TOKEN.substring(0, 30)}...` : '❌ NOT SET');
+console.log('- LAVALINK_HOST:', process.env.LAVALINK_HOST || 'not set');
+console.log('- LAVALINK_PASSWORD:', process.env.LAVALINK_PASSWORD ? '***' : '❌ NOT SET');
+console.log('');
+
+// ============ VALIDATE REQUIRED VARIABLES ============
+if (!process.env.DISCORD_TOKEN) {
+    console.error('❌ FATAL ERROR: DISCORD_TOKEN environment variable is not set!');
+    console.error('Please set DISCORD_TOKEN in Railway Dashboard → Variables tab');
+    process.exit(1);
+}
+
+// Validate token format
+const tokenRegex = /^[A-Za-z0-9_-]{24,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}$/;
+if (!tokenRegex.test(process.env.DISCORD_TOKEN)) {
+    console.error('❌ FATAL ERROR: DISCORD_TOKEN format is invalid!');
+    console.error('Token should be in format: MTMwN...XXXX.XXXXXX.XXXXXXXXX');
+    console.error('Current token length:', process.env.DISCORD_TOKEN.length);
+    process.exit(1);
+}
+
+console.log('✅ DISCORD_TOKEN validation passed');
+console.log('');
 
 // ============ BOT INFO ============
 const BOT_INFO = {
@@ -25,19 +55,36 @@ const BOT_INFO = {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.status(200).send('OK'));
-app.get('/ping', (req, res) => res.status(200).send('OK'));
-app.get('/health', (req, res) => {
-    const health = {
+app.get('/', (req, res) => {
+    res.status(200).json({
         status: 'OK',
-        uptime: process.uptime(),
-        timestamp: Date.now(),
-        guilds: client.guilds?.cache.size || 0
-    };
-    res.status(200).json(health);
+        bot: BOT_INFO.name,
+        version: BOT_INFO.version,
+        uptime: Math.floor(process.uptime()),
+        discord: client.user ? {
+            username: client.user.username,
+            id: client.user.id,
+            guilds: client.guilds.cache.size
+        } : 'Not connected'
+    });
 });
 
-app.listen(PORT, () => console.log(`🌐 Server running on port ${PORT}`));
+app.get('/ping', (req, res) => res.status(200).send('OK'));
+
+app.get('/health', (req, res) => {
+    const health = {
+        status: client.isReady() ? 'healthy' : 'unhealthy',
+        uptime: process.uptime(),
+        timestamp: Date.now(),
+        guilds: client.guilds?.cache.size || 0,
+        ready: client.isReady()
+    };
+    res.status(client.isReady() ? 200 : 503).json(health);
+});
+
+const server = app.listen(PORT, () => {
+    console.log(`🌐 Express server running on port ${PORT}`);
+});
 
 // ============ DISCORD CLIENT ============
 const client = new Client({
@@ -53,9 +100,9 @@ const client = new Client({
 const Nodes = [
     {
         name: 'Railway-Primary',
-        url: process.env.LAVALINK_HOST || 'localhost:2333',
+        url: process.env.LAVALINK_HOST || 'lavalink-railway-production-c122.up.railway.app:443',
         auth: process.env.LAVALINK_PASSWORD || 'ToingDc',
-        secure: process.env.LAVALINK_HOST ? true : false
+        secure: true
     },
     {
         name: 'Serenetia-Backup',
@@ -64,6 +111,12 @@ const Nodes = [
         secure: true
     }
 ];
+
+console.log('🎵 Lavalink Nodes Configuration:');
+Nodes.forEach(node => {
+    console.log(`  - ${node.name}: ${node.url} (secure: ${node.secure})`);
+});
+console.log('');
 
 // ============ KAZAGUMO SETUP ============
 const kazagumo = new Kazagumo(
@@ -91,7 +144,7 @@ kazagumo.shoukaku.on('ready', (name) => {
 });
 
 kazagumo.shoukaku.on('error', (name, error) => {
-    console.error(`❌ Lavalink ${name} error:`, error);
+    console.error(`❌ Lavalink ${name} error:`, error.message);
 });
 
 kazagumo.shoukaku.on('disconnect', (name, reason) => {
@@ -121,7 +174,7 @@ kazagumo.on('playerStart', (player, track) => {
         .setFooter({ text: `Volume: ${player.volume}%  •  ${BOT_INFO.name} v${BOT_INFO.version}` })
         .setTimestamp();
 
-    channel.send({ embeds: [embed] });
+    channel.send({ embeds: [embed] }).catch(console.error);
 });
 
 kazagumo.on('playerEmpty', (player) => {
@@ -131,7 +184,7 @@ kazagumo.on('playerEmpty', (player) => {
             .setColor('#ff6b6b')
             .setDescription('⏹️ Queue finished. Disconnecting...')
             .setTimestamp();
-        channel.send({ embeds: [embed] });
+        channel.send({ embeds: [embed] }).catch(console.error);
     }
     player.destroy();
 });
@@ -140,7 +193,7 @@ kazagumo.on('playerError', (player, error) => {
     console.error('Player error:', error);
     const channel = client.channels.cache.get(player.textId);
     if (channel) {
-        channel.send({ embeds: [errorEmbed('Failed to play track. Skipping...')] });
+        channel.send({ embeds: [errorEmbed('Failed to play track. Skipping...')] }).catch(console.error);
     }
     if (player.queue.size > 0) {
         player.skip();
@@ -149,10 +202,13 @@ kazagumo.on('playerError', (player, error) => {
 
 // ============ BOT READY ============
 client.once('ready', () => {
+    console.log('═══════════════════════════════════════');
     console.log(`🤖 ${client.user.tag} is online!`);
     console.log(`📊 Serving ${client.guilds.cache.size} servers`);
+    console.log(`👥 Serving ${client.users.cache.size} users`);
     console.log(`🎵 Nodes: ${Nodes.map(n => n.name).join(', ')}`);
     console.log(`🚂 Running on Railway!`);
+    console.log('═══════════════════════════════════════');
     
     client.user.setActivity('!help • Music Bot', { type: 2 });
 });
@@ -248,7 +304,7 @@ client.on('messageCreate', async (message) => {
         if (!player?.queue.current) return message.reply({ embeds: [errorEmbed('Nothing to skip!')] });
 
         player.skip();
-        message.react('⏭️');
+        message.react('⏭️').catch(console.error);
     }
 
     // ==================== STOP ====================
@@ -257,7 +313,7 @@ client.on('messageCreate', async (message) => {
         if (!player) return message.reply({ embeds: [errorEmbed('Nothing is playing!')] });
 
         player.destroy();
-        message.react('⏹️');
+        message.react('⏹️').catch(console.error);
     }
 
     // ==================== PAUSE ====================
@@ -266,7 +322,7 @@ client.on('messageCreate', async (message) => {
         if (!player) return message.reply({ embeds: [errorEmbed('Nothing is playing!')] });
 
         player.pause(true);
-        message.react('⏸️');
+        message.react('⏸️').catch(console.error);
     }
 
     // ==================== RESUME ====================
@@ -275,7 +331,7 @@ client.on('messageCreate', async (message) => {
         if (!player) return message.reply({ embeds: [errorEmbed('Nothing is playing!')] });
 
         player.pause(false);
-        message.react('▶️');
+        message.react('▶️').catch(console.error);
     }
 
     // ==================== QUEUE ====================
@@ -517,15 +573,62 @@ client.on('messageCreate', async (message) => {
 
 // ============ ERROR HANDLING ============
 process.on('unhandledRejection', (error) => {
-    console.error('Unhandled promise rejection:', error);
+    console.error('❌ Unhandled promise rejection:', error);
 });
 
 process.on('uncaughtException', (error) => {
-    console.error('Uncaught exception:', error);
+    console.error('❌ Uncaught exception:', error);
+});
+
+client.on('error', (error) => {
+    console.error('❌ Discord client error:', error);
+});
+
+client.on('warn', (info) => {
+    console.warn('⚠️ Discord client warning:', info);
+});
+
+// ============ GRACEFUL SHUTDOWN ============
+process.on('SIGTERM', () => {
+    console.log('⏹️ SIGTERM received, shutting down gracefully...');
+    client.destroy();
+    server.close(() => {
+        console.log('✅ Server closed');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('⏹️ SIGINT received, shutting down gracefully...');
+    client.destroy();
+    server.close(() => {
+        console.log('✅ Server closed');
+        process.exit(0);
+    });
 });
 
 // ============ LOGIN ============
-client.login(process.env.DISCORD_TOKEN).catch(err => {
-    console.error('Failed to login:', err);
-    process.exit(1);
-});
+console.log('🔐 Attempting to login to Discord...');
+console.log('Token length:', process.env.DISCORD_TOKEN.length);
+console.log('');
+
+client.login(process.env.DISCORD_TOKEN)
+    .then(() => {
+        console.log('✅ Successfully logged in to Discord!');
+    })
+    .catch((error) => {
+        console.error('═══════════════════════════════════════');
+        console.error('❌ FAILED TO LOGIN TO DISCORD');
+        console.error('═══════════════════════════════════════');
+        console.error('Error:', error.message);
+        console.error('Code:', error.code);
+        console.error('');
+        console.error('Troubleshooting:');
+        console.error('1. Check DISCORD_TOKEN in Railway Variables');
+        console.error('2. Token format: MTMwN...XXXX.XXXXXX.XXXXXXXXX');
+        console.error('3. Token length should be 70-80 characters');
+        console.error('4. Regenerate token at: https://discord.com/developers');
+        console.error('5. Make sure MESSAGE CONTENT INTENT is enabled');
+        console.error('═══════════════════════════════════════');
+        process.exit(1);
+    });
